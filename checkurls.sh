@@ -24,10 +24,12 @@ export SCRIPT_LOG="Script_Monitor.log"
 URL_Status() {
 
 SetParam
-sed -i '/^$/d' $URLFILE; #To Parse the URLFILE for removal of blank rows
-cat $URLFILE | while read next
+# sed -i '/^$/d' $URLFILE; #To Parse the URLFILE for removal of blank rows
+# cat $URLFILE | while read next # removed cat in favour of read line-by-line
+while IFS= read -r next
 do
-STATUS_CODE=`curl -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{http_code} %{url_effective}\n' $next`
+# Added %{url} for requested URL and  %{url_effective for target URL, in case of broken rewrites, chanted http_code to response_code
+STATUS_CODE=`curl -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}\n' "$next"`
 # If you want to set a timeout then add --max-time 15, here 15 is 15seconds
 case $STATUS_CODE in
 
@@ -83,7 +85,7 @@ esac
 
 URL_SafeStatus $STATUS_CODE
 
-done;
+done < "$URLFILE";
 
 }
 
@@ -95,14 +97,14 @@ do
 #echo "Reading Safe Code= $safestatus";
 if [ $1 -eq $safestatus ] ; then
 
-echo "At $TIME: Status Of  URL $next = $STATUS_UP $STATUS_CODE";
+echo "At $TIME: Status Of URL $next = $STATUS_UP $STATUS_CODE";
 flag=1
 break;
 fi
 done
 
 if [ $flag -ne 1 ] ; then
-echo "At $TIME: Status Of  URL $next = $STATUS_DOWN $STATUS_CODE" | Mail_Admin $TIME $next
+echo "At $TIME: Status Of URL $next = $STATUS_DOWN $STATUS_CODE" | Mail_Admin $TIME $next
 #break;
 fi
 
@@ -120,7 +122,8 @@ fi
 # Comment here to send send email on every down URL!
 Mail_Admin() {
 SetParam
-echo "At $1 URL $2 is DOWN!!"
+# Remove $STATUS_CODE here, if you just want the plain DOWN message without extended status results
+echo "At $1 URL $next is DOWN!! $STATUS_CODE"
  }
 
 Send_Log() {
