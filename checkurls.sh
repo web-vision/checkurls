@@ -13,11 +13,15 @@
 # Added summary per status code and parallel streams (STREAMS variable or -s option)
 #
 # Added progress bar (-n to disable) and quiet mode (-q)
+# Added CSV export of the results from the log file without a new run (-c, -a)
 #
 # Usage: ./checkurls.sh [-s STREAMS] [-q] [-n]
+#        ./checkurls.sh -c [-a]
 #   -s STREAMS  Number of URLs checked in parallel (default: 10), also settable via env STREAMS=20 ./checkurls.sh
 #   -q          Quiet: show only progress bar and summary on screen (all results are still written to the log)
 #   -n          No progress bar
+#   -c          Convert the results of the last run in the log file to CSV, no URLs are checked
+#   -a          With -c: convert all runs in the log file instead of only the last one
 
 SetParam() {
 export URLFILE="urllist.txt"
@@ -32,6 +36,8 @@ export STATUS_UP=`echo -e "\E[32m[ RUNNING ]\E[0m"`
 export STATUS_DOWN=`echo -e "\E[33m[ DOWN ]\E[0m"`
 export MAIL_TO="please-change-your@email-address-here.com"
 export SCRIPT_LOG="Script_Monitor.log"
+# Separator for the CSV export (-c), ";" works with Excel in German locale
+export CSV_SEP=";"
 }
 
 URL_Status() {
@@ -174,7 +180,7 @@ printf "%-6s %8s %9s   %s\n" "Code" "Count" "Percent" "Description"
 echo "-------------------------------------------------------------"
 sort "$codes_file" | uniq -c | sort -k2,2n | while read -r count code
 do
-printf "%-6s %8d %8s%%   %s\n" "$code" "$count" "$(awk -v c="$count" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')" "$(Status_Text $code)"
+printf "%-6s %8d %8s%%   %s\n" "$code" "$count" "$(LC_ALL=C awk -v c="$count" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')" "$(Status_Text $code)"
 done
 echo "-------------------------------------------------------------"
 local up=0 code
@@ -186,8 +192,8 @@ if [ "$code" = "$safestatus" ] ; then up=$((up+1)); break; fi
 done
 done < "$codes_file"
 local down=$((total-up))
-printf "%-6s %8d %8s%%\n" "UP" "$up" "$(awk -v c="$up" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')"
-printf "%-6s %8d %8s%%\n" "DOWN" "$down" "$(awk -v c="$down" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')"
+printf "%-6s %8d %8s%%\n" "UP" "$up" "$(LC_ALL=C awk -v c="$up" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')"
+printf "%-6s %8d %8s%%\n" "DOWN" "$down" "$(LC_ALL=C awk -v c="$down" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')"
 printf "%-6s %8d %8s%%\n" "Total" "$total" "100.00"
 echo "============================================================="
 }
@@ -239,6 +245,67 @@ SetParam
 echo "At $1 URL $next is DOWN!! $STATUS_CODE"
  }
 
+Convert_Log() {
+# Converts results from the log file to CSV without checking the URLs again.
+# Uses the "Status Of URL ... RUNNING" and "... is DOWN!!" lines, so older log files work too.
+# A run is identified by its timestamp, default is the run of the last result in the log ($1=1: all runs).
+local all_runs="$1" codes_file csv_file last_time
+if [ ! -f "$SCRIPT_LOG" ] ; then
+echo "$SCRIPT_LOG NOT FOUND!!"
+exit 1
+fi
+# Descriptions for all status codes found in the log, used by awk below
+codes_file=$(mktemp)
+for code in $(grep -oE '(RUNNING \]([^ ]*)? |is DOWN!! )[0-9]{3}' "$SCRIPT_LOG" | grep -oE '[0-9]{3}$' | sort -u)
+do
+printf '%s\t%s\n' "$code" "$(Status_Text $code)" >> "$codes_file"
+done
+LC_ALL=C awk -v all_runs="$all_runs" -v sep="$CSV_SEP" -v codes_file="$codes_file" -v base="${SCRIPT_LOG%.*}" '
+function parse(line,   p, q, r, n, parts, prefix) {
+  # Remove color codes (real escape sequences and literal \E[..m)
+  gsub(/\033\[[0-9;]*m/, "", line); gsub(/\\E\[[0-9;]*m/, "", line)
+  if (substr(line, 1, 3) != "At ") return 0
+  if ((p = index(line, ": Status Of URL ")) > 0) {
+    r = substr(line, p + 16); q = index(r, " = [ RUNNING ] ")
+    if (q == 0) return 0
+    t = substr(line, 4, p - 4); url = substr(r, 1, q - 1); rest = substr(r, q + 15); status = "UP"
+  } else if ((p = index(line, " URL ")) > 0 && (q = index(line, " is DOWN!! ")) > p) {
+    t = substr(line, 4, p - 4); url = substr(line, p + 5, q - p - 5); rest = substr(line, q + 11); status = "DOWN"
+  } else return 0
+  n = split(rest, parts, " "); code = parts[1]; effective = ""
+  # rest is "<code> <url> <effective url>" (older logs may only contain the code)
+  prefix = code " " url " "
+  if (substr(rest, 1, length(prefix)) == prefix) effective = substr(rest, length(prefix) + 1)
+  else if (n >= 3) effective = parts[n]
+  return 1
+}
+function csv(v) { gsub(/"/, "\"\"", v); return "\"" v "\"" }
+function nice_time(v,   d) {
+  # 13-10-2026_17.19.34 -> 2026-10-13 17:19:34
+  if (v ~ /^[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]_[0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]$/)
+    return substr(v, 7, 4) "-" substr(v, 4, 2) "-" substr(v, 1, 2) " " substr(v, 12, 2) ":" substr(v, 15, 2) ":" substr(v, 18, 2)
+  return v
+}
+BEGIN { while ((getline l < codes_file) > 0) { split(l, a, "\t"); desc[a[1]] = a[2] } }
+# First pass: find the timestamp of the last result
+FNR == NR { if (parse($0)) last = t; next }
+FNR == 1 {
+  if (last == "") { print "No results found in log file." > "/dev/stderr"; exit 1 }
+  out = base "_" (all_runs == 1 ? "all" : last) ".csv"
+  print "Time" sep "URL" sep "Status" sep "Code" sep "Description" sep "Effective URL" sep "Redirected" > out
+}
+# Second pass: write CSV
+parse($0) && (all_runs == 1 || t == last) {
+  print csv(nice_time(t)) sep csv(url) sep status sep code sep csv(desc[code]) sep csv(effective) sep (effective != "" && effective != url ? "yes" : "no") > out
+  rows++
+}
+END { if (out != "") { close(out); print "Written " rows " rows to " out } }
+' "$SCRIPT_LOG" "$SCRIPT_LOG"
+local rc=$?
+rm -f "$codes_file"
+return $rc
+}
+
 Send_Log() {
 SetParam
 if [ -f $SCRIPT_LOG ] ; then
@@ -255,9 +322,12 @@ URL_Status
 }
 Usage() {
 echo "Usage: $0 [-s STREAMS] [-q] [-n]"
+echo "       $0 -c [-a]"
 echo "  -s STREAMS  Number of URLs checked in parallel (default: 10)"
 echo "  -q          Quiet: show only progress bar and summary (results are still logged)"
 echo "  -n          No progress bar"
+echo "  -c          Convert the results of the last run in the log to CSV (no new run)"
+echo "  -a          With -c: convert all runs in the log"
 echo "  -h          Show this help"
 }
 
@@ -266,18 +336,29 @@ export -f Check_URL
 
 QUIET=0
 PROGRESS=1
-while getopts "s:qnh" opt
+CONVERT=0
+ALL_RUNS=0
+while getopts "s:qnhca" opt
 do
 case $opt in
 s) STREAMS="$OPTARG" ;;
 q) QUIET=1 ;;
 n) PROGRESS=0 ;;
+c) CONVERT=1 ;;
+a) ALL_RUNS=1 ;;
 h) Usage; exit 0 ;;
 *) Usage; exit 1 ;;
 esac
 done
 
 SetParam
+
+# CSV export only: read the existing log file, do not check any URL
+if [ "$CONVERT" = 1 ] ; then
+Convert_Log "$ALL_RUNS"
+exit $?
+fi
+
 case "$STREAMS" in
 ''|*[!0-9]*|0) echo "Invalid number of streams: '$STREAMS' (must be a positive integer)"; Usage; exit 1 ;;
 esac

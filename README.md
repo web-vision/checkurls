@@ -15,6 +15,8 @@ URLs are checked in parallel streams with a progress bar, at the end a summary p
 STREAMS=5 ./checkurls.sh  # set streams via environment variable
 ./checkurls.sh -q         # quiet: only progress bar and summary on screen, results go to the log
 ./checkurls.sh -n         # no progress bar
+./checkurls.sh -c         # convert last run in Script_Monitor.log to CSV (no URLs are checked)
+./checkurls.sh -c -a      # convert all runs in Script_Monitor.log to CSV
 ./checkurls.sh -h         # show help
 ```
 
@@ -56,3 +58,20 @@ Total        16   100.00%
 ```
 
 UP/DOWN are based on SAFE_STATUSCODES.
+
+## CSV export
+`-c` converts the results already written to Script_Monitor.log into a CSV file. **No new run is started**, no URL is requested.
+
+* Default: only the last run (identified by the timestamp of the last result in the log) → `Script_Monitor_<timestamp>.csv`
+* With `-a`: all runs in the log → `Script_Monitor_all.csv`
+* Separator is `;` (works with Excel in German locale), change `CSV_SEP` in `SetParam` if needed
+* Also works with log files written by older versions of the script
+
+```
+Time;URL;Status;Code;Description;Effective URL;Redirected
+"2026-10-13 17:19:34";"https://www.example.com/old";UP;200;"OK";"https://www.example.com/new";yes
+"2026-10-13 17:19:34";"https://www.example.com/gone";DOWN;404;"Not Found";"https://www.example.com/gone";no
+```
+
+* Status: UP/DOWN based on SAFE_STATUSCODES at the time of the run
+* Effective URL: target URL after following redirects, Redirected: `yes` if it differs from the requested URL
