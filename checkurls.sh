@@ -8,10 +8,19 @@
 #
 # 2022-01-22 ChangeLog
 # Removed 301 from SAFE Status Code and added follow Link and max-redirs to detect redirect loops
+#
+# 2026-10-13 ChangeLog
+# Added summary per status code and parallel streams (STREAMS variable or -s option)
+#
+# Usage: ./checkurls.sh [-s STREAMS]
+#   -s STREAMS  Number of URLs checked in parallel (default: 10), also settable via env STREAMS=20 ./checkurls.sh
 
 SetParam() {
 export URLFILE="urllist.txt"
-export TIME=`date +%d-%m-%Y_%H.%M.%S`
+# TIME is set once per run, so all workers use the same timestamp
+export TIME="${TIME:-`date +%d-%m-%Y_%H.%M.%S`}"
+# Number of parallel streams (URLs checked at the same time), override with -s or env STREAMS
+export STREAMS="${STREAMS:-10}"
 
 # Change Status codes here - eg. remove 301 redirects 
 SAFE_STATUSCODES=( 200 201 202 203 204 205 206 207 208 226 401)
@@ -24,16 +33,12 @@ export SCRIPT_LOG="Script_Monitor.log"
 URL_Status() {
 
 SetParam
-CODES_FILE=$(mktemp)
-# sed -i '/^$/d' $URLFILE; #To Parse the URLFILE for removal of blank rows
-# cat $URLFILE | while read next # removed cat in favour of read line-by-line
-while IFS= read -r next || [ -n "$next" ]
+export CODES_FILE=$(mktemp)
+# Remove empty lines and Windows line endings, then check the URLs in $STREAMS parallel streams.
+# Note: with more than 1 stream the output order differs from the order in $URLFILE.
+grep -v '^[[:space:]]*$' "$URLFILE" | tr -d '\r' | tr '\n' '\0' | xargs -0 -n 1 -P "$STREAMS" bash -c 'Check_URL "$1"' _ |
+while IFS=$'\t' read -r next STATUS_CODE
 do
-# Skip empty lines
-[ -z "$next" ] && continue
-# Added %{url} for requested URL and  %{url_effective for target URL, in case of broken rewrites, chanted http_code to response_code
-STATUS_CODE=`curl -k -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}\n' "$next"`
-# If you want to set a timeout then add --max-time 15, here 15 is 15seconds
 # First field of STATUS_CODE is the plain HTTP code, the rest are the URLs
 HTTP_CODE=${STATUS_CODE%% *}
 echo "At $TIME: $next url status returned $STATUS_CODE : $(Status_Text $HTTP_CODE)"
@@ -41,7 +46,7 @@ echo "$HTTP_CODE" >> "$CODES_FILE"
 
 URL_SafeStatus $HTTP_CODE
 
-done < "$URLFILE";
+done
 
 Print_Summary "$CODES_FILE"
 rm -f "$CODES_FILE"
@@ -111,6 +116,7 @@ local total
 total=$(grep -c . "$codes_file")
 echo ""
 echo "===================== SUMMARY ($TIME) ====================="
+echo "Checked with $STREAMS parallel stream(s)"
 if [ "$total" -eq 0 ] ; then
 echo "No URLs checked."
 return
@@ -135,6 +141,16 @@ printf "%-6s %8d %8s%%\n" "UP" "$up" "$(awk -v c="$up" -v t="$total" 'BEGIN { pr
 printf "%-6s %8d %8s%%\n" "DOWN" "$down" "$(awk -v c="$down" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')"
 printf "%-6s %8d %8s%%\n" "Total" "$total" "100.00"
 echo "============================================================="
+}
+
+Check_URL() {
+# Checks a single URL, runs in its own process (one per stream).
+# Prints one line "<URL><TAB><STATUS_CODE>", which is written at once and therefore not mixed up with other streams.
+local STATUS_CODE
+# Added %{url} for requested URL and  %{url_effective for target URL, in case of broken rewrites, chanted http_code to response_code
+STATUS_CODE=`curl -k -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}' "$1"`
+# If you want to set a timeout then add --max-time 15, here 15 is 15seconds
+printf '%s\t%s\n' "$1" "$STATUS_CODE"
 }
 
 URL_SafeStatus() {
@@ -188,6 +204,27 @@ Main_Menu() {
 URL_Status
 
 }
+Usage() {
+echo "Usage: $0 [-s STREAMS]"
+echo "  -s STREAMS  Number of URLs checked in parallel (default: 10)"
+echo "  -h          Show this help"
+}
+
+# Make functions available for the parallel worker processes started by xargs
+export -f Check_URL
+
+while getopts "s:h" opt
+do
+case $opt in
+s) STREAMS="$OPTARG" ;;
+h) Usage; exit 0 ;;
+*) Usage; exit 1 ;;
+esac
+done
+
 SetParam
+case "$STREAMS" in
+''|*[!0-9]*|0) echo "Invalid number of streams: '$STREAMS' (must be a positive integer)"; Usage; exit 1 ;;
+esac
 Main_Menu | tee -a $SCRIPT_LOG
 Send_Log
