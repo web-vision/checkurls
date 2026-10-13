@@ -24,69 +24,117 @@ export SCRIPT_LOG="Script_Monitor.log"
 URL_Status() {
 
 SetParam
+CODES_FILE=$(mktemp)
 # sed -i '/^$/d' $URLFILE; #To Parse the URLFILE for removal of blank rows
 # cat $URLFILE | while read next # removed cat in favour of read line-by-line
-while IFS= read -r next
+while IFS= read -r next || [ -n "$next" ]
 do
+# Skip empty lines
+[ -z "$next" ] && continue
 # Added %{url} for requested URL and  %{url_effective for target URL, in case of broken rewrites, chanted http_code to response_code
-STATUS_CODE=`curl -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}\n' "$next"`
+STATUS_CODE=`curl -k -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}\n' "$next"`
 # If you want to set a timeout then add --max-time 15, here 15 is 15seconds
-case $STATUS_CODE in
+# First field of STATUS_CODE is the plain HTTP code, the rest are the URLs
+HTTP_CODE=${STATUS_CODE%% *}
+echo "At $TIME: $next url status returned $STATUS_CODE : $(Status_Text $HTTP_CODE)"
+echo "$HTTP_CODE" >> "$CODES_FILE"
 
-100) echo "At $TIME: $next url status returned $STATUS_CODE : Continue" ;;
-101) echo "At $TIME: $next url status returned $STATUS_CODE : Switching Protocols" ;;
-102) echo "At $TIME: $next url status returned $STATUS_CODE : Processing (WebDAV) (RFC 2518) " ;;
-103) echo "At $TIME: $next url status returned $STATUS_CODE : Checkpoint" ;;
-122) echo "At $TIME: $next url status returned $STATUS_CODE : Request-URI too long" ;;
-200) echo "At $TIME: $next url status returned $STATUS_CODE : OK" ;;
-201) echo "At $TIME: $next url status returned $STATUS_CODE : Created" ;;
-202) echo "At $TIME: $next url status returned $STATUS_CODE : Accepted" ;;
-203) echo "At $TIME: $next url status returned $STATUS_CODE : Non-Authoritative Information" ;;
-204) echo "At $TIME: $next url status returned $STATUS_CODE : No Content" ;;
-205) echo "At $TIME: $next url status returned $STATUS_CODE : Reset Content" ;;
-206) echo "At $TIME: $next url status returned $STATUS_CODE : Partial Content" ;;
-207) echo "At $TIME: $next url status returned $STATUS_CODE : Multi-Status (WebDAV) (RFC 4918) " ;;
-208) echo "At $TIME: $next url status returned $STATUS_CODE : Already Reported (WebDAV) (RFC 5842) " ;;
-226) echo "At $TIME: $next url status returned $STATUS_CODE : IM Used (RFC 3229) " ;;
-300) echo "At $TIME: $next url status returned $STATUS_CODE : Multiple Choices" ;;
-301) echo "At $TIME: $next url status returned $STATUS_CODE : Moved Permanently" ;;
-302) echo "At $TIME: $next url status returned $STATUS_CODE : Found" ;;
-303) echo "At $TIME: $next url status returned $STATUS_CODE : See Other" ;;
-304) echo "At $TIME: $next url status returned $STATUS_CODE : Not Modified" ;;
-305) echo "At $TIME: $next url status returned $STATUS_CODE : Use Proxy" ;;
-306) echo "At $TIME: $next url status returned $STATUS_CODE : Switch Proxy" ;;
-307) echo "At $TIME: $next url status returned $STATUS_CODE : Temporary Redirect (since HTTP/1.1)" ;;
-308) echo "At $TIME: $next url status returned $STATUS_CODE : Resume Incomplete" ;;
-400) echo "At $TIME: $next url status returned $STATUS_CODE : Bad Request" ;;
-401) echo "At $TIME: $next url status returned $STATUS_CODE : Unauthorized" ;;
-402) echo "At $TIME: $next url status returned $STATUS_CODE : Payment Required" ;;
-403) echo "At $TIME: $next url status returned $STATUS_CODE : Forbidden" ;;
-404) echo "At $TIME: $next url status returned $STATUS_CODE : Not Found" ;;
-405) echo "At $TIME: $next url status returned $STATUS_CODE : Method Not Allowed" ;;
-406) echo "At $TIME: $next url status returned $STATUS_CODE : Not Acceptable" ;;
-407) echo "At $TIME: $next url status returned $STATUS_CODE : Proxy Authentication Required" ;;
-408) echo "At $TIME: $next url status returned $STATUS_CODE : Request Timeout" ;;
-409) echo "At $TIME: $next url status returned $STATUS_CODE : Conflict" ;;
-410) echo "At $TIME: $next url status returned $STATUS_CODE : Gone" ;;
-411) echo "At $TIME: $next url status returned $STATUS_CODE : Length Required" ;;
-412) echo "At $TIME: $next url status returned $STATUS_CODE : Precondition Failed" ;;
-413) echo "At $TIME: $next url status returned $STATUS_CODE : Request Entity Too Large" ;;
-414) echo "At $TIME: $next url status returned $STATUS_CODE : Request-URI Too Long" ;;
-415) echo "At $TIME: $next url status returned $STATUS_CODE : Unsupported Media Type" ;;
-416) echo "At $TIME: $next url status returned $STATUS_CODE : Requested Range Not Satisfiable" ;;
-417) echo "At $TIME: $next url status returned $STATUS_CODE : Expectation Failed" ;;
-500) echo "At $TIME: $next url status returned $STATUS_CODE : Internal Server Error" ;;
-501) echo "At $TIME: $next url status returned $STATUS_CODE : Not Implemented" ;;
-502) echo "At $TIME: $next url status returned $STATUS_CODE : Bad Gateway" ;;
-503) echo "At $TIME: $next url status returned $STATUS_CODE : Service Unavailable" ;;
-504) echo "At $TIME: $next url status returned $STATUS_CODE : Gateway Timeout" ;;
-505) echo "At $TIME: $next url status returned $STATUS_CODE : HTTP Version Not Supported" ;;
-esac
-
-URL_SafeStatus $STATUS_CODE
+URL_SafeStatus $HTTP_CODE
 
 done < "$URLFILE";
 
+Print_Summary "$CODES_FILE"
+rm -f "$CODES_FILE"
+
+}
+
+Status_Text() {
+# Returns the description for a HTTP status code
+case $1 in
+000) echo "No response (connection error, timeout, DNS or too many redirects)" ;;
+100) echo "Continue" ;;
+101) echo "Switching Protocols" ;;
+102) echo "Processing (WebDAV) (RFC 2518)" ;;
+103) echo "Checkpoint" ;;
+122) echo "Request-URI too long" ;;
+200) echo "OK" ;;
+201) echo "Created" ;;
+202) echo "Accepted" ;;
+203) echo "Non-Authoritative Information" ;;
+204) echo "No Content" ;;
+205) echo "Reset Content" ;;
+206) echo "Partial Content" ;;
+207) echo "Multi-Status (WebDAV) (RFC 4918)" ;;
+208) echo "Already Reported (WebDAV) (RFC 5842)" ;;
+226) echo "IM Used (RFC 3229)" ;;
+300) echo "Multiple Choices" ;;
+301) echo "Moved Permanently" ;;
+302) echo "Found" ;;
+303) echo "See Other" ;;
+304) echo "Not Modified" ;;
+305) echo "Use Proxy" ;;
+306) echo "Switch Proxy" ;;
+307) echo "Temporary Redirect (since HTTP/1.1)" ;;
+308) echo "Resume Incomplete" ;;
+400) echo "Bad Request" ;;
+401) echo "Unauthorized" ;;
+402) echo "Payment Required" ;;
+403) echo "Forbidden" ;;
+404) echo "Not Found" ;;
+405) echo "Method Not Allowed" ;;
+406) echo "Not Acceptable" ;;
+407) echo "Proxy Authentication Required" ;;
+408) echo "Request Timeout" ;;
+409) echo "Conflict" ;;
+410) echo "Gone" ;;
+411) echo "Length Required" ;;
+412) echo "Precondition Failed" ;;
+413) echo "Request Entity Too Large" ;;
+414) echo "Request-URI Too Long" ;;
+415) echo "Unsupported Media Type" ;;
+416) echo "Requested Range Not Satisfiable" ;;
+417) echo "Expectation Failed" ;;
+500) echo "Internal Server Error" ;;
+501) echo "Not Implemented" ;;
+502) echo "Bad Gateway" ;;
+503) echo "Service Unavailable" ;;
+504) echo "Gateway Timeout" ;;
+505) echo "HTTP Version Not Supported" ;;
+*) echo "Unknown status code" ;;
+esac
+}
+
+Print_Summary() {
+# Prints count and percentage of every returned HTTP status code
+local codes_file="$1"
+local total
+total=$(grep -c . "$codes_file")
+echo ""
+echo "===================== SUMMARY ($TIME) ====================="
+if [ "$total" -eq 0 ] ; then
+echo "No URLs checked."
+return
+fi
+printf "%-6s %8s %9s   %s\n" "Code" "Count" "Percent" "Description"
+echo "-------------------------------------------------------------"
+sort "$codes_file" | uniq -c | sort -k2,2n | while read -r count code
+do
+printf "%-6s %8d %8s%%   %s\n" "$code" "$count" "$(awk -v c="$count" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')" "$(Status_Text $code)"
+done
+echo "-------------------------------------------------------------"
+local up=0 code
+while read -r code
+do
+for safestatus in ${SAFE_STATUSCODES[@]}
+do
+if [ "$code" = "$safestatus" ] ; then up=$((up+1)); break; fi
+done
+done < "$codes_file"
+local down=$((total-up))
+printf "%-6s %8d %8s%%\n" "UP" "$up" "$(awk -v c="$up" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')"
+printf "%-6s %8d %8s%%\n" "DOWN" "$down" "$(awk -v c="$down" -v t="$total" 'BEGIN { printf "%.2f", c*100/t }')"
+printf "%-6s %8d %8s%%\n" "Total" "$total" "100.00"
+echo "============================================================="
 }
 
 URL_SafeStatus() {
