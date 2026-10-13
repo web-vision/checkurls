@@ -12,8 +12,12 @@
 # 2026-10-13 ChangeLog
 # Added summary per status code and parallel streams (STREAMS variable or -s option)
 #
-# Usage: ./checkurls.sh [-s STREAMS]
+# Added progress bar (-n to disable) and quiet mode (-q)
+#
+# Usage: ./checkurls.sh [-s STREAMS] [-q] [-n]
 #   -s STREAMS  Number of URLs checked in parallel (default: 10), also settable via env STREAMS=20 ./checkurls.sh
+#   -q          Quiet: show only progress bar and summary on screen (all results are still written to the log)
+#   -n          No progress bar
 
 SetParam() {
 export URLFILE="urllist.txt"
@@ -34,23 +38,68 @@ URL_Status() {
 
 SetParam
 export CODES_FILE=$(mktemp)
-# Remove empty lines and Windows line endings, then check the URLs in $STREAMS parallel streams.
+local list_file total count=0 block
+list_file=$(mktemp)
+# Remove empty lines and Windows line endings
+grep -v '^[[:space:]]*$' "$URLFILE" | tr -d '\r' > "$list_file"
+total=$(wc -l < "$list_file" | tr -d ' ')
+SECONDS=0
+Progress_Draw 0 "$total"
+# Check the URLs in $STREAMS parallel streams.
 # Note: with more than 1 stream the output order differs from the order in $URLFILE.
-grep -v '^[[:space:]]*$' "$URLFILE" | tr -d '\r' | tr '\n' '\0' | xargs -0 -n 1 -P "$STREAMS" bash -c 'Check_URL "$1"' _ |
+tr '\n' '\0' < "$list_file" | xargs -0 -n 1 -P "$STREAMS" bash -c 'Check_URL "$1"' _ |
 while IFS=$'\t' read -r next STATUS_CODE
 do
 # First field of STATUS_CODE is the plain HTTP code, the rest are the URLs
 HTTP_CODE=${STATUS_CODE%% *}
-echo "At $TIME: $next url status returned $STATUS_CODE : $(Status_Text $HTTP_CODE)"
 echo "$HTTP_CODE" >> "$CODES_FILE"
-
-URL_SafeStatus $HTTP_CODE
-
+block="$(echo "At $TIME: $next url status returned $STATUS_CODE : $(Status_Text $HTTP_CODE)"; URL_SafeStatus $HTTP_CODE)"
+count=$((count+1))
+# Remove progress bar, print result, redraw progress bar below it
+Progress_Clear
+Output "$block"
+Progress_Draw "$count" "$total"
 done
+Progress_Finish
 
-Print_Summary "$CODES_FILE"
-rm -f "$CODES_FILE"
+Print_Summary "$CODES_FILE" | tee -a "$SCRIPT_LOG"
+rm -f "$CODES_FILE" "$list_file"
 
+}
+
+Output() {
+# Writes results to the log and, if not in quiet mode, to the screen
+[ "$QUIET" = 1 ] || printf '%s\n' "$1"
+printf '%s\n' "$1" >> "$SCRIPT_LOG"
+}
+
+Format_Time() {
+# Formats seconds as hh:mm:ss
+printf '%02d:%02d:%02d' $(($1/3600)) $(($1%3600/60)) $(($1%60))
+}
+
+Progress_Draw() {
+# Draws the progress bar on stderr: [#####-----]  50% (2/4) elapsed 00:00:05 ETA 00:00:05
+[ "$PROGRESS" = 1 ] || return 0
+local current=$1 total=$2 width=${PROGRESS_WIDTH:-40} percent filled bar empty eta="--:--:--"
+[ "$total" -gt 0 ] || return 0
+percent=$((current*100/total))
+filled=$((current*width/total))
+[ "$current" -gt 0 ] && eta=$(Format_Time $((SECONDS*(total-current)/current)))
+printf -v bar '%*s' "$filled" ''
+printf -v empty '%*s' "$((width-filled))" ''
+printf '\r\033[K[%s%s] %3d%% (%d/%d) elapsed %s ETA %s' "${bar// /#}" "${empty// /-}" "$percent" "$current" "$total" "$(Format_Time $SECONDS)" "$eta" >&2
+}
+
+Progress_Clear() {
+[ "$PROGRESS" = 1 ] || return 0
+printf '\r\033[K' >&2
+}
+
+Progress_Finish() {
+# Keep the final progress bar visible and move to the next line
+[ "$PROGRESS" = 1 ] || return 0
+printf '\n' >&2
 }
 
 Status_Text() {
@@ -116,7 +165,7 @@ local total
 total=$(grep -c . "$codes_file")
 echo ""
 echo "===================== SUMMARY ($TIME) ====================="
-echo "Checked with $STREAMS parallel stream(s)"
+echo "Checked with $STREAMS parallel stream(s), duration $(Format_Time $SECONDS)"
 if [ "$total" -eq 0 ] ; then
 echo "No URLs checked."
 return
@@ -205,18 +254,24 @@ URL_Status
 
 }
 Usage() {
-echo "Usage: $0 [-s STREAMS]"
+echo "Usage: $0 [-s STREAMS] [-q] [-n]"
 echo "  -s STREAMS  Number of URLs checked in parallel (default: 10)"
+echo "  -q          Quiet: show only progress bar and summary (results are still logged)"
+echo "  -n          No progress bar"
 echo "  -h          Show this help"
 }
 
 # Make functions available for the parallel worker processes started by xargs
 export -f Check_URL
 
-while getopts "s:h" opt
+QUIET=0
+PROGRESS=1
+while getopts "s:qnh" opt
 do
 case $opt in
 s) STREAMS="$OPTARG" ;;
+q) QUIET=1 ;;
+n) PROGRESS=0 ;;
 h) Usage; exit 0 ;;
 *) Usage; exit 1 ;;
 esac
@@ -226,5 +281,12 @@ SetParam
 case "$STREAMS" in
 ''|*[!0-9]*|0) echo "Invalid number of streams: '$STREAMS' (must be a positive integer)"; Usage; exit 1 ;;
 esac
-Main_Menu | tee -a $SCRIPT_LOG
+# Show the progress bar only if stderr is a terminal (not in cron jobs or when redirected)
+[ -t 2 ] || PROGRESS=0
+# Fit the progress bar into the terminal width (the text next to the bar needs about 55 characters)
+TERM_COLS=$(stty size 2>/dev/null < /dev/tty | awk '{print $2}')
+PROGRESS_WIDTH=$(( ${TERM_COLS:-95} - 55 ))
+[ "$PROGRESS_WIDTH" -gt 40 ] && PROGRESS_WIDTH=40
+[ "$PROGRESS_WIDTH" -lt 10 ] && PROGRESS_WIDTH=10
+Main_Menu
 Send_Log
