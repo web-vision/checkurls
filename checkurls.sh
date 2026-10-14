@@ -24,7 +24,7 @@
 #   -a          With -c: convert all runs in the log file instead of only the last one
 
 SetParam() {
-export URLFILE="urllist.txt"
+export URLFILE="urllist-new.txt"
 # TIME is set once per run, so all workers use the same timestamp
 export TIME="${TIME:-`date +%d-%m-%Y_%H.%M.%S`}"
 # Number of parallel streams (URLs checked at the same time), override with -s or env STREAMS
@@ -203,7 +203,7 @@ Check_URL() {
 # Prints one line "<URL><TAB><STATUS_CODE>", which is written at once and therefore not mixed up with other streams.
 local STATUS_CODE
 # Added %{url} for requested URL and  %{url_effective for target URL, in case of broken rewrites, chanted http_code to response_code
-STATUS_CODE=`curl -k -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}' "$1"`
+STATUS_CODE=`curl -f -k -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}' "$1"`
 # If you want to set a timeout then add --max-time 15, here 15 is 15seconds
 printf '%s\t%s\n' "$1" "$STATUS_CODE"
 }
