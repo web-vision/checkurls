@@ -15,6 +15,7 @@ URLs are checked in parallel streams with a progress bar, at the end a summary p
 STREAMS=5 ./checkurls.sh  # set streams via environment variable
 ./checkurls.sh -q         # quiet: only progress bar and summary on screen, results go to the log
 ./checkurls.sh -n         # no progress bar
+./checkurls.sh -r         # do not follow redirects, report e.g. 301 instead of the target status
 ./checkurls.sh -c         # convert last run in Script_Monitor.log to CSV (no URLs are checked)
 ./checkurls.sh -c -a      # convert all runs in Script_Monitor.log to CSV
 ./checkurls.sh -h         # show help
@@ -25,6 +26,17 @@ STREAMS=5 ./checkurls.sh  # set streams via environment variable
 * `-s` overrides the environment variable `STREAMS`, which overrides the default
 * With more than 1 stream the output order differs from the order in urllist.txt
 * Be careful with high values when all URLs point to the same server: rate limits or a WAF may block you, start with 5-10
+
+## Redirects
+* By default redirects are followed (`curl -L`, max 10, see `MAX_REDIRS`), the status code is the one of the final target
+* Redirect loops (more than 10 redirects) are reported as `000`
+* `-r` (or `FOLLOW_REDIRECTS=0 ./checkurls.sh`) disables this, then the redirect itself is reported (e.g. `301`, DOWN as it is not in SAFE_STATUSCODES)
+
+## Mail
+* Set `MAIL_TO` in `SetParam`, as long as it is empty or the placeholder address, no mail is sent
+* The mail contains the summary and the DOWN URLs of the current run only, not the whole Script_Monitor.log
+  (the log grows with every run and was rejected by the mail server: `message file too big`)
+* The list of DOWN URLs is cut off at `MAIL_MAX_SIZE` bytes (default 2 MB), all results are in the log or the CSV export
 
 ## Progress bar
 While running, a progress bar is shown at the bottom of the terminal:

@@ -15,11 +15,16 @@
 # Added progress bar (-n to disable) and quiet mode (-q)
 # Added CSV export of the results from the log file without a new run (-c, -a)
 #
-# Usage: ./checkurls.sh [-s STREAMS] [-q] [-n]
+# 2026-10-14 ChangeLog
+# Following redirects (curl -L) is optional and enabled by default (-r to disable)
+# Mail contains only summary and DOWN URLs of the current run instead of the whole log (fixes "message file too big")
+#
+# Usage: ./checkurls.sh [-s STREAMS] [-q] [-n] [-r]
 #        ./checkurls.sh -c [-a]
 #   -s STREAMS  Number of URLs checked in parallel (default: 10), also settable via env STREAMS=20 ./checkurls.sh
 #   -q          Quiet: show only progress bar and summary on screen (all results are still written to the log)
 #   -n          No progress bar
+#   -r          Do not follow redirects (default: follow up to 10 redirects with curl -L)
 #   -c          Convert the results of the last run in the log file to CSV, no URLs are checked
 #   -a          With -c: convert all runs in the log file instead of only the last one
 
@@ -29,12 +34,23 @@ export URLFILE="urllist-new.txt"
 export TIME="${TIME:-`date +%d-%m-%Y_%H.%M.%S`}"
 # Number of parallel streams (URLs checked at the same time), override with -s or env STREAMS
 export STREAMS="${STREAMS:-10}"
+# Follow redirects (1) or report the redirect status code itself, e.g. 301 (0), override with -r or env FOLLOW_REDIRECTS=0
+export FOLLOW_REDIRECTS="${FOLLOW_REDIRECTS:-1}"
+export MAX_REDIRS=10
+if [ "$FOLLOW_REDIRECTS" = 1 ] ; then
+export CURL_REDIRECT_OPTS="-L --max-redirs $MAX_REDIRS"
+else
+export CURL_REDIRECT_OPTS=""
+fi
 
 # Change Status codes here - eg. remove 301 redirects 
 SAFE_STATUSCODES=( 200 201 202 203 204 205 206 207 208 226 401)
 export STATUS_UP=`echo -e "\E[32m[ RUNNING ]\E[0m"`
 export STATUS_DOWN=`echo -e "\E[33m[ DOWN ]\E[0m"`
+# Mail with summary and DOWN URLs of each run, leave empty to send no mail
 export MAIL_TO="please-change-your@email-address-here.com"
+# Max size of the mail body in bytes, the list of DOWN URLs is cut off above it (postfix default limit is 10 MB)
+export MAIL_MAX_SIZE=2000000
 export SCRIPT_LOG="Script_Monitor.log"
 # Separator for the CSV export (-c), ";" works with Excel in German locale
 export CSV_SEP=";"
@@ -68,7 +84,7 @@ Progress_Draw "$count" "$total"
 done
 Progress_Finish
 
-Print_Summary "$CODES_FILE" | tee -a "$SCRIPT_LOG"
+Print_Summary "$CODES_FILE" | tee -a "$SCRIPT_LOG" "$RUN_LOG"
 rm -f "$CODES_FILE" "$list_file"
 
 }
@@ -77,6 +93,8 @@ Output() {
 # Writes results to the log and, if not in quiet mode, to the screen
 [ "$QUIET" = 1 ] || printf '%s\n' "$1"
 printf '%s\n' "$1" >> "$SCRIPT_LOG"
+# Results of the current run only, used for the mail
+printf '%s\n' "$1" >> "$RUN_LOG"
 }
 
 Format_Time() {
@@ -171,7 +189,7 @@ local total
 total=$(grep -c . "$codes_file")
 echo ""
 echo "===================== SUMMARY ($TIME) ====================="
-echo "Checked with $STREAMS parallel stream(s), duration $(Format_Time $SECONDS)"
+echo "Checked with $STREAMS parallel stream(s), follow redirects: $([ "$FOLLOW_REDIRECTS" = 1 ] && echo "yes (max $MAX_REDIRS)" || echo no), duration $(Format_Time $SECONDS)"
 if [ "$total" -eq 0 ] ; then
 echo "No URLs checked."
 return
@@ -203,7 +221,8 @@ Check_URL() {
 # Prints one line "<URL><TAB><STATUS_CODE>", which is written at once and therefore not mixed up with other streams.
 local STATUS_CODE
 # Added %{url} for requested URL and  %{url_effective for target URL, in case of broken rewrites, chanted http_code to response_code
-STATUS_CODE=`curl -f -k -L --max-redirs 10 --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}' "$1"`
+# Redirect options come from SetParam (CURL_REDIRECT_OPTS), -f only changes the exit code of curl, not the status code
+STATUS_CODE=`curl -f -k $CURL_REDIRECT_OPTS --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}' "$1"`
 # If you want to set a timeout then add --max-time 15, here 15 is 15seconds
 printf '%s\t%s\n' "$1" "$STATUS_CODE"
 }
@@ -307,12 +326,38 @@ return $rc
 }
 
 Send_Log() {
+# Mails summary and DOWN URLs of the current run. The whole log file is not sent anymore,
+# because it grows with every run and gets rejected by the mail server ("message file too big").
 SetParam
-if [ -f $SCRIPT_LOG ] ; then
-mailx -s "$0 Script All Url Check Log Details Till $TIME" $MAIL_TO < $SCRIPT_LOG
-else
-echo "$SCRIPT_LOG NOT FOUND!!"
+case "$MAIL_TO" in
+''|please-change-your@*) echo "No mail sent: MAIL_TO is not configured in SetParam."; return 0 ;;
+esac
+if ! command -v mailx >/dev/null 2>&1 ; then
+echo "No mail sent: mailx not found."
+return 0
 fi
+if [ ! -s "$RUN_LOG" ] ; then
+echo "No mail sent: no results in this run."
+return 0
+fi
+local down
+down=$(grep -c ' is DOWN!! ' "$RUN_LOG")
+Mail_Body | mailx -s "$0: URL check $TIME - $down URL(s) DOWN" "$MAIL_TO"
+}
+
+Mail_Body() {
+echo "URL check of $TIME"
+echo "All results: $PWD/$SCRIPT_LOG (export as CSV with: $0 -c)"
+# Summary of this run
+sed -n '/SUMMARY/,$p' "$RUN_LOG"
+echo ""
+echo "DOWN URLs:"
+# List of DOWN URLs, cut off at MAIL_MAX_SIZE bytes
+grep ' is DOWN!! ' "$RUN_LOG" | LC_ALL=C awk -v max="$MAIL_MAX_SIZE" -v log_file="$SCRIPT_LOG" '
+{ size += length($0) + 1 }
+size > max { cut++; next }
+{ print }
+END { if (cut) print "... " cut " more DOWN URL(s) not shown (MAIL_MAX_SIZE), see " log_file }'
 }
 
 Main_Menu() {
@@ -321,11 +366,12 @@ URL_Status
 
 }
 Usage() {
-echo "Usage: $0 [-s STREAMS] [-q] [-n]"
+echo "Usage: $0 [-s STREAMS] [-q] [-n] [-r]"
 echo "       $0 -c [-a]"
 echo "  -s STREAMS  Number of URLs checked in parallel (default: 10)"
 echo "  -q          Quiet: show only progress bar and summary (results are still logged)"
 echo "  -n          No progress bar"
+echo "  -r          Do not follow redirects (default: follow up to 10 redirects)"
 echo "  -c          Convert the results of the last run in the log to CSV (no new run)"
 echo "  -a          With -c: convert all runs in the log"
 echo "  -h          Show this help"
@@ -338,12 +384,13 @@ QUIET=0
 PROGRESS=1
 CONVERT=0
 ALL_RUNS=0
-while getopts "s:qnhca" opt
+while getopts "s:qnhcar" opt
 do
 case $opt in
 s) STREAMS="$OPTARG" ;;
 q) QUIET=1 ;;
 n) PROGRESS=0 ;;
+r) FOLLOW_REDIRECTS=0 ;;
 c) CONVERT=1 ;;
 a) ALL_RUNS=1 ;;
 h) Usage; exit 0 ;;
@@ -369,5 +416,8 @@ TERM_COLS=$(stty size 2>/dev/null < /dev/tty | awk '{print $2}')
 PROGRESS_WIDTH=$(( ${TERM_COLS:-95} - 55 ))
 [ "$PROGRESS_WIDTH" -gt 40 ] && PROGRESS_WIDTH=40
 [ "$PROGRESS_WIDTH" -lt 10 ] && PROGRESS_WIDTH=10
+# Results of the current run, used for the mail (Send_Log)
+export RUN_LOG=$(mktemp)
 Main_Menu
 Send_Log
+rm -f "$RUN_LOG"
