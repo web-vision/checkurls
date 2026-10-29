@@ -19,6 +19,10 @@
 # Following redirects (curl -L) is optional and enabled by default (-r to disable)
 # Mail contains only summary and DOWN URLs of the current run instead of the whole log (fixes "message file too big")
 #
+# 2026-10-29 ChangeLog
+# Fixed mixed up results of parallel streams on macOS with long URLs ("integer expression expected"):
+# workers write their result to a file and only pass a short number through the pipe
+#
 # Usage: ./checkurls.sh [-s STREAMS] [-q] [-n] [-r]
 #        ./checkurls.sh -c [-a]
 #   -s STREAMS  Number of URLs checked in parallel (default: 10), also settable via env STREAMS=20 ./checkurls.sh
@@ -69,9 +73,15 @@ SECONDS=0
 Progress_Draw 0 "$total"
 # Check the URLs in $STREAMS parallel streams.
 # Note: with more than 1 stream the output order differs from the order in $URLFILE.
-tr '\n' '\0' < "$list_file" | xargs -0 -n 1 -P "$STREAMS" bash -c 'Check_URL "$1"' _ |
-while IFS=$'\t' read -r next STATUS_CODE
+# Each URL gets a number, the workers write their result to "$RESULT_DIR/<number>" and only print the number.
+# Long result lines must not go through the pipe: on macOS only 512 bytes are written at once (PIPE_BUF),
+# longer lines of parallel streams got mixed up (e.g. "integer expression expected" with a broken status code).
+export RESULT_DIR=$(mktemp -d)
+awk '{ print NR "\t" $0 }' "$list_file" | tr '\n' '\0' | xargs -0 -n 1 -P "$STREAMS" bash -c 'Check_URL "$1"' _ |
+while read -r id
 do
+IFS=$'\t' read -r next STATUS_CODE < "$RESULT_DIR/$id"
+rm -f "$RESULT_DIR/$id"
 # First field of STATUS_CODE is the plain HTTP code, the rest are the URLs
 HTTP_CODE=${STATUS_CODE%% *}
 echo "$HTTP_CODE" >> "$CODES_FILE"
@@ -86,6 +96,7 @@ Progress_Finish
 
 Print_Summary "$CODES_FILE" | tee -a "$SCRIPT_LOG" "$RUN_LOG"
 rm -f "$CODES_FILE" "$list_file"
+rm -rf "$RESULT_DIR"
 
 }
 
@@ -218,13 +229,15 @@ echo "============================================================="
 
 Check_URL() {
 # Checks a single URL, runs in its own process (one per stream).
-# Prints one line "<URL><TAB><STATUS_CODE>", which is written at once and therefore not mixed up with other streams.
-local STATUS_CODE
+# $1 is "<number><TAB><URL>". Writes "<URL><TAB><STATUS_CODE>" to "$RESULT_DIR/<number>",
+# then prints only the short number, so the output of parallel streams cannot get mixed up.
+local id="${1%%$'\t'*}" url="${1#*$'\t'}" STATUS_CODE
 # Added %{url} for requested URL and  %{url_effective for target URL, in case of broken rewrites, chanted http_code to response_code
 # Redirect options come from SetParam (CURL_REDIRECT_OPTS), -f only changes the exit code of curl, not the status code
-STATUS_CODE=`curl -f -k $CURL_REDIRECT_OPTS --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}' "$1"`
+STATUS_CODE=`curl -f -k $CURL_REDIRECT_OPTS --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}' "$url"`
 # If you want to set a timeout then add --max-time 15, here 15 is 15seconds
-printf '%s\t%s\n' "$1" "$STATUS_CODE"
+printf '%s\t%s\n' "$url" "$STATUS_CODE" > "$RESULT_DIR/$id"
+echo "$id"
 }
 
 URL_SafeStatus() {
@@ -233,7 +246,7 @@ for safestatus in ${SAFE_STATUSCODES[@]}
 do
 #echo "got Value of STATUS CODE= $1";
 #echo "Reading Safe Code= $safestatus";
-if [ $1 -eq $safestatus ] ; then
+if [ "$1" = "$safestatus" ] ; then
 
 echo "At $TIME: Status Of URL $next = $STATUS_UP $STATUS_CODE";
 flag=1
