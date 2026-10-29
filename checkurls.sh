@@ -22,13 +22,16 @@
 # 2026-10-29 ChangeLog
 # Fixed mixed up results of parallel streams on macOS with long URLs ("integer expression expected"):
 # workers write their result to a file and only pass a short number through the pipe
+# Added retries for URLs without status code (000): -d ATTEMPTS, delay between attempts -w SECONDS
 #
-# Usage: ./checkurls.sh [-s STREAMS] [-q] [-n] [-r]
+# Usage: ./checkurls.sh [-s STREAMS] [-q] [-n] [-r] [-d ATTEMPTS] [-w SECONDS]
 #        ./checkurls.sh -c [-a]
 #   -s STREAMS  Number of URLs checked in parallel (default: 10), also settable via env STREAMS=20 ./checkurls.sh
 #   -q          Quiet: show only progress bar and summary on screen (all results are still written to the log)
 #   -n          No progress bar
 #   -r          Do not follow redirects (default: follow up to 10 redirects with curl -L)
+#   -d ATTEMPTS Attempts for URLs without status code (000), e.g. -d 3 (default: 1 = no retry)
+#   -w SECONDS  Delay before a retry, grows with each attempt: 1st retry SECONDS, 2nd 2x SECONDS ... (default: 5)
 #   -c          Convert the results of the last run in the log file to CSV, no URLs are checked
 #   -a          With -c: convert all runs in the log file instead of only the last one
 
@@ -38,6 +41,10 @@ export URLFILE="urllist-new.txt"
 export TIME="${TIME:-`date +%d-%m-%Y_%H.%M.%S`}"
 # Number of parallel streams (URLs checked at the same time), override with -s or env STREAMS
 export STREAMS="${STREAMS:-10}"
+# Attempts for URLs without status code (000 = no response, timeout, connection reset ...), override with -d or env RETRIES
+export RETRIES="${RETRIES:-1}"
+# Delay in seconds before a retry, multiplied with the number of the attempt (5s, 10s, 15s ...), override with -w or env RETRY_DELAY
+export RETRY_DELAY="${RETRY_DELAY:-5}"
 # Follow redirects (1) or report the redirect status code itself, e.g. 301 (0), override with -r or env FOLLOW_REDIRECTS=0
 export FOLLOW_REDIRECTS="${FOLLOW_REDIRECTS:-1}"
 export MAX_REDIRS=10
@@ -77,15 +84,22 @@ Progress_Draw 0 "$total"
 # Long result lines must not go through the pipe: on macOS only 512 bytes are written at once (PIPE_BUF),
 # longer lines of parallel streams got mixed up (e.g. "integer expression expected" with a broken status code).
 export RESULT_DIR=$(mktemp -d)
+export RETRY_FILE=$(mktemp)
 awk '{ print NR "\t" $0 }' "$list_file" | tr '\n' '\0' | xargs -0 -n 1 -P "$STREAMS" bash -c 'Check_URL "$1"' _ |
 while read -r id
 do
-IFS=$'\t' read -r next STATUS_CODE < "$RESULT_DIR/$id"
+IFS=$'\t' read -r next STATUS_CODE attempts < "$RESULT_DIR/$id"
 rm -f "$RESULT_DIR/$id"
 # First field of STATUS_CODE is the plain HTTP code, the rest are the URLs
 HTTP_CODE=${STATUS_CODE%% *}
 echo "$HTTP_CODE" >> "$CODES_FILE"
-block="$(echo "At $TIME: $next url status returned $STATUS_CODE : $(Status_Text $HTTP_CODE)"; URL_SafeStatus $HTTP_CODE)"
+# Remember URLs that needed retries for the summary
+retry_info=""
+if [ "${attempts:-1}" -gt 1 ] ; then
+echo "$HTTP_CODE" >> "$RETRY_FILE"
+retry_info=" (after $attempts attempts)"
+fi
+block="$(echo "At $TIME: $next url status returned $STATUS_CODE : $(Status_Text $HTTP_CODE)$retry_info"; URL_SafeStatus $HTTP_CODE)"
 count=$((count+1))
 # Remove progress bar, print result, redraw progress bar below it
 Progress_Clear
@@ -97,6 +111,7 @@ Progress_Finish
 Print_Summary "$CODES_FILE" | tee -a "$SCRIPT_LOG" "$RUN_LOG"
 rm -f "$CODES_FILE" "$list_file"
 rm -rf "$RESULT_DIR"
+rm -f "$RETRY_FILE"
 
 }
 
@@ -201,6 +216,14 @@ total=$(grep -c . "$codes_file")
 echo ""
 echo "===================== SUMMARY ($TIME) ====================="
 echo "Checked with $STREAMS parallel stream(s), follow redirects: $([ "$FOLLOW_REDIRECTS" = 1 ] && echo "yes (max $MAX_REDIRS)" || echo no), duration $(Format_Time $SECONDS)"
+if [ "$RETRIES" -gt 1 ] ; then
+local retried=0 recovered=0
+if [ -s "$RETRY_FILE" ] ; then
+retried=$(grep -c . "$RETRY_FILE")
+recovered=$(grep -vc '^000$' "$RETRY_FILE")
+fi
+echo "Retries for no response: max $RETRIES attempts, delay ${RETRY_DELAY}s, $retried URL(s) retried, $recovered of them answered"
+fi
 if [ "$total" -eq 0 ] ; then
 echo "No URLs checked."
 return
@@ -229,14 +252,22 @@ echo "============================================================="
 
 Check_URL() {
 # Checks a single URL, runs in its own process (one per stream).
-# $1 is "<number><TAB><URL>". Writes "<URL><TAB><STATUS_CODE>" to "$RESULT_DIR/<number>",
+# $1 is "<number><TAB><URL>". Writes "<URL><TAB><STATUS_CODE><TAB><ATTEMPTS>" to "$RESULT_DIR/<number>",
 # then prints only the short number, so the output of parallel streams cannot get mixed up.
-local id="${1%%$'\t'*}" url="${1#*$'\t'}" STATUS_CODE
+# URLs without status code (000) are tried up to $RETRIES times, waiting $RETRY_DELAY * attempt seconds in between.
+local id="${1%%$'\t'*}" url="${1#*$'\t'}" STATUS_CODE attempt=1
+while :
+do
 # Added %{url} for requested URL and  %{url_effective for target URL, in case of broken rewrites, chanted http_code to response_code
 # Redirect options come from SetParam (CURL_REDIRECT_OPTS), -f only changes the exit code of curl, not the status code
 STATUS_CODE=`curl -f -k $CURL_REDIRECT_OPTS --output /dev/null --silent --head --write-out '%{response_code} %{url} %{url_effective}' "$url"`
 # If you want to set a timeout then add --max-time 15, here 15 is 15seconds
-printf '%s\t%s\n' "$url" "$STATUS_CODE" > "$RESULT_DIR/$id"
+[ "${STATUS_CODE%% *}" != "000" ] && break
+[ "$attempt" -ge "$RETRIES" ] && break
+sleep $((RETRY_DELAY * attempt))
+attempt=$((attempt + 1))
+done
+printf '%s\t%s\t%s\n' "$url" "$STATUS_CODE" "$attempt" > "$RESULT_DIR/$id"
 echo "$id"
 }
 
@@ -379,12 +410,14 @@ URL_Status
 
 }
 Usage() {
-echo "Usage: $0 [-s STREAMS] [-q] [-n] [-r]"
+echo "Usage: $0 [-s STREAMS] [-q] [-n] [-r] [-d ATTEMPTS] [-w SECONDS]"
 echo "       $0 -c [-a]"
 echo "  -s STREAMS  Number of URLs checked in parallel (default: 10)"
 echo "  -q          Quiet: show only progress bar and summary (results are still logged)"
 echo "  -n          No progress bar"
 echo "  -r          Do not follow redirects (default: follow up to 10 redirects)"
+echo "  -d ATTEMPTS Attempts for URLs without status code (000), e.g. -d 3 (default: 1 = no retry)"
+echo "  -w SECONDS  Delay before a retry, multiplied with the attempt: 5s, 10s, ... (default: 5)"
 echo "  -c          Convert the results of the last run in the log to CSV (no new run)"
 echo "  -a          With -c: convert all runs in the log"
 echo "  -h          Show this help"
@@ -397,13 +430,15 @@ QUIET=0
 PROGRESS=1
 CONVERT=0
 ALL_RUNS=0
-while getopts "s:qnhcar" opt
+while getopts "s:qnhcard:w:" opt
 do
 case $opt in
 s) STREAMS="$OPTARG" ;;
 q) QUIET=1 ;;
 n) PROGRESS=0 ;;
 r) FOLLOW_REDIRECTS=0 ;;
+d) RETRIES="$OPTARG" ;;
+w) RETRY_DELAY="$OPTARG" ;;
 c) CONVERT=1 ;;
 a) ALL_RUNS=1 ;;
 h) Usage; exit 0 ;;
@@ -421,6 +456,12 @@ fi
 
 case "$STREAMS" in
 ''|*[!0-9]*|0) echo "Invalid number of streams: '$STREAMS' (must be a positive integer)"; Usage; exit 1 ;;
+esac
+case "$RETRIES" in
+''|*[!0-9]*|0) echo "Invalid number of attempts: '$RETRIES' (must be a positive integer)"; Usage; exit 1 ;;
+esac
+case "$RETRY_DELAY" in
+''|*[!0-9]*) echo "Invalid retry delay: '$RETRY_DELAY' (must be 0 or more seconds)"; Usage; exit 1 ;;
 esac
 # Show the progress bar only if stderr is a terminal (not in cron jobs or when redirected)
 [ -t 2 ] || PROGRESS=0
