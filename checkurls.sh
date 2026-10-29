@@ -36,7 +36,7 @@
 #   -a          With -c: convert all runs in the log file instead of only the last one
 
 SetParam() {
-export URLFILE="urllist-new.txt"
+export URLFILE="urllist.txt"
 # TIME is set once per run, so all workers use the same timestamp
 export TIME="${TIME:-`date +%d-%m-%Y_%H.%M.%S`}"
 # Number of parallel streams (URLs checked at the same time), override with -s or env STREAMS
